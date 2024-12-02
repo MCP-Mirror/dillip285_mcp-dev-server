@@ -1,0 +1,36 @@
+[project]
+name = "mcp-dev-server"
+version = "0.1.0"
+description = "MCP Development Server for managing software development projects"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "mcp>=1.0.0",
+    "gitpython>=3.1.0",
+    "docker>=7.0.0", 
+    "pydantic>=2.0.0",
+    "anyio>=4.0.0",
+    "jinja2>=3.0.0",  # Added Jinja2 dependency
+    "inotify>=0.2.10",  # For container file monitoring
+    "watchdog>=2.1.0"   # For enhanced file system events
+]
+
+[[project.authors]]
+name = "Development Team"
+email = "team@example.com"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project.scripts]
+mcp-dev-server = "mcp_dev_server:main"
+
+[tool.pylint]
+max-line-length = 100
+disable = ["C0111", "C0103"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+ignore_missing_imports = true
