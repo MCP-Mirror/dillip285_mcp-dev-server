@@ -1,33 +1,33 @@
-"""Logging configuration for the MCP Development Server."""
+"""Logging configuration for MCP Development Server."""
 import logging
 import sys
 from typing import Optional
 
-def setup_logging(name: str, level: Optional[str] = None) -> logging.Logger:
-    """
-    Set up logging configuration for the given module.
+def setup_logging(name: Optional[str] = None, level: int = logging.INFO) -> logging.Logger:
+    """Setup logging configuration.
     
     Args:
-        name: Module name for the logger
-        level: Optional logging level (defaults to INFO)
+        name: Logger name
+        level: Logging level
         
     Returns:
-        Configured logger instance
+        logging.Logger: Configured logger instance
     """
     # Create logger
-    logger = logging.getLogger(name)
+    logger = logging.getLogger(name or __name__)
+    logger.setLevel(level)
     
-    # Set level
-    logger.setLevel(level or logging.INFO)
+    # Create stderr handler (MCP protocol requires clean stdout)
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setLevel(level)
     
-    # Create handler if none exist
-    if not logger.handlers:
-        handler = logging.StreamHandler(sys.stderr)
-        handler.setFormatter(
-            logging.Formatter(
-                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-            )
-        )
-        logger.addHandler(handler)
+    # Create formatter
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    handler.setFormatter(formatter)
+    
+    # Add handler to logger
+    logger.addHandler(handler)
     
     return logger

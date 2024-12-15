@@ -1,97 +1,73 @@
-"""Configuration management for the MCP Development Server."""
+"""Configuration management for MCP Development Server."""
 import os
 import json
-from typing import Any, Dict, Optional
+from typing import Dict, Any, Optional
 from pathlib import Path
-from pydantic import BaseModel, Field
-
-from .logging import setup_logging
-from .errors import ConfigurationError
-
-logger = setup_logging(__name__)
-
-class ProjectConfig(BaseModel):
-    """Project configuration model."""
-    name: str
-    path: Path
-    template: str = Field(default="basic")
-    git_enabled: bool = Field(default=True)
-    docker_config: Dict[str, Any] = Field(default_factory=dict)
-    build_config: Dict[str, Any] = Field(default_factory=dict)
-    test_config: Dict[str, Any] = Field(default_factory=dict)
-    dependencies: Dict[str, Dict[str, str]] = Field(default_factory=lambda: {
-        "production": {},
-        "development": {}
-    })
-
-    class Config:
-        arbitrary_types_allowed = True
-
-class ServerConfig(BaseModel):
-    """Server configuration model."""
-    host: str = Field(default="127.0.0.1")
-    port: int = Field(default=8000)
-    log_level: str = Field(default="INFO")
-    workspace_dir: Path = Field(default=Path.home() / ".mcp-dev-server")
-    max_projects: int = Field(default=10)
 
 class Config:
     """Configuration manager."""
     
-    def __init__(self, config_path: Optional[str] = None):
-        self.config_path = config_path or self._default_config_path()
-        self.server_config = ServerConfig()
-        self._load_config()
+    def __init__(self):
+        """Initialize configuration."""
+        self.config_dir = self._get_config_dir()
+        self.config_file = self.config_dir / "config.json"
+        self.config: Dict[str, Any] = self._load_config()
         
-    @staticmethod
-    def _default_config_path() -> str:
-        """Get default configuration path."""
-        config_dir = os.path.expanduser("~/.config/mcp-dev-server")
-        os.makedirs(config_dir, exist_ok=True)
-        return os.path.join(config_dir, "config.json")
+    def _get_config_dir(self) -> Path:
+        """Get configuration directory path."""
+        if os.name == "nt":  # Windows
+            config_dir = Path(os.getenv("APPDATA")) / "Claude"
+        else:  # macOS/Linux
+            config_dir = Path.home() / ".config" / "claude"
+            
+        config_dir.mkdir(parents=True, exist_ok=True)
+        return config_dir
         
-    def _load_config(self) -> None:
+    def _load_config(self) -> Dict[str, Any]:
         """Load configuration from file."""
-        try:
-            if os.path.exists(self.config_path):
-                with open(self.config_path) as f:
-                    config_data = json.load(f)
-                self.server_config = ServerConfig(**config_data)
-                logger.info("Loaded configuration from %s", self.config_path)
-            else:
-                self._save_config()
-                logger.info("Created default configuration at %s", self.config_path)
-        except Exception as e:
-            raise ConfigurationError(f"Failed to load configuration: {str(e)}")
+        if self.config_file.exists():
+            try:
+                with open(self.config_file, "r") as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"Error loading config: {e}")
+                return self._get_default_config()
+        else:
+            config = self._get_default_config()
+            self._save_config(config)
+            return config
             
-    def _save_config(self) -> None:
-        """Save current configuration to file."""
+    def _save_config(self, config: Dict[str, Any]):
+        """Save configuration to file."""
         try:
-            with open(self.config_path, 'w') as f:
-                json.dump(
-                    self.server_config.dict(),
-                    f,
-                    indent=2,
-                    default=str
-                )
+            with open(self.config_file, "w") as f:
+                json.dump(config, f, indent=2)
         except Exception as e:
-            raise ConfigurationError(f"Failed to save configuration: {str(e)}")
+            print(f"Error saving config: {e}")
             
-    def update_server_config(self, **kwargs) -> None:
-        """Update server configuration."""
-        try:
-            # Update only provided fields
-            for key, value in kwargs.items():
-                if hasattr(self.server_config, key):
-                    setattr(self.server_config, key, value)
-            self._save_config()
-        except Exception as e:
-            raise ConfigurationError(f"Failed to update configuration: {str(e)}")
-
-    @staticmethod
-    def create_project_config(**kwargs) -> ProjectConfig:
-        """Create a new project configuration."""
-        try:
-            return ProjectConfig(**kwargs)
-        except Exception as e:
-            raise ConfigurationError(f"Failed to create project configuration: {str(e)}")
+    def _get_default_config(self) -> Dict[str, Any]:
+        """Get default configuration."""
+        return {
+            "projectsDir": str(Path.home() / "Projects"),
+            "templatesDir": str(self.config_dir / "templates"),
+            "environments": {
+                "default": {
+                    "type": "docker",
+                    "image": "python:3.12-slim"
+                }
+            }
+        }
+        
+    def get(self, key: str, default: Any = None) -> Any:
+        """Get configuration value."""
+        return self.config.get(key, default)
+        
+    def set(self, key: str, value: Any):
+        """Set configuration value."""
+        self.config[key] = value
+        self._save_config(self.config)
+        
+    def update(self, updates: Dict[str, Any]):
+        """Update multiple configuration values."""
+        self.config.update(updates)
+        self._save_config(self.config)

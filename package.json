@@ -1,0 +1,35 @@
+{
+  "name": "mcp-dev-server",
+  "version": "1.0.0",
+  "description": "Model Context Protocol Development Server",
+  "main": "dist/app.js",
+  "scripts": {
+    "start": "node dist/app.js",
+    "dev": "nodemon src/app.ts",
+    "build": "tsc",
+    "test": "jest",
+    "lint": "eslint . --ext .ts"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "typescript": "^5.0.0",
+    "mongoose": "^7.0.0",
+    "dotenv": "^16.0.0",
+    "winston": "^3.8.0",
+    "cors": "^2.8.5",
+    "helmet": "^6.0.0",
+    "joi": "^17.0.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.17",
+    "@types/node": "^18.0.0",
+    "@types/jest": "^29.0.0",
+    "@typescript-eslint/eslint-plugin": "^5.0.0",
+    "@typescript-eslint/parser": "^5.0.0",
+    "eslint": "^8.0.0",
+    "jest": "^29.0.0",
+    "nodemon": "^2.0.0",
+    "ts-jest": "^29.0.0",
+    "ts-node": "^10.0.0"
+  }
+}

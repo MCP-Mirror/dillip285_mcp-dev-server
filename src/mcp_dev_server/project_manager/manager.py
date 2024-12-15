@@ -1,163 +1,275 @@
-"""Project management for MCP Development Server."""
-import os
-from typing import Dict, List, Optional
+"""Project management system for MCP Development Server."""
+import asyncio
+import json
 from pathlib import Path
+from typing import Dict, Any, Optional, List
+import git
 
-from ..utils.config import ProjectConfig, Config
+from .project_types import PROJECT_TYPES, ProjectType, BuildSystem
+from .templates import TemplateManager
+from ..prompts.project_templates import PROJECT_TEMPLATES
 from ..utils.logging import setup_logging
-from ..utils.errors import ProjectError, ProjectNotFoundError
-from .context import ProjectContext
-from .git import GitManager
+from ..utils.errors import ProjectError
+from ..docker.manager import DockerManager
 
 logger = setup_logging(__name__)
 
 class ProjectManager:
-    """Manages multiple development projects."""
+    """Manages development projects."""
     
-    def __init__(self, server_config: Optional[Config] = None):
-        self.config = server_config or Config()
-        self.projects: Dict[str, ProjectContext] = {}
-        self.current_project: Optional[ProjectContext] = None
-        self._setup_workspace()
+    def __init__(self, config):
+        """Initialize project manager.
         
-    def _setup_workspace(self) -> None:
-        """Set up workspace directory."""
-        os.makedirs(self.config.server_config.workspace_dir, exist_ok=True)
+        Args:
+            config: Server configuration instance
+        """
+        self.config = config
+        self.template_manager = TemplateManager()
+        self.docker_manager = DockerManager()
+        self.current_project = None
+        self.projects = {}
+        
+    def get_available_project_types(self) -> Dict[str, Dict[str, Any]]:
+        """Get list of available project types.
+        
+        Returns:
+            Dict[str, Dict[str, Any]]: Project type information
+        """
+        return {
+            name: {
+                "name": pt.name,
+                "description": pt.description,
+                "build_systems": [bs.value for bs in pt.build_systems],
+                "default_build_system": pt.default_build_system.value
+            }
+            for name, pt in PROJECT_TYPES.items()
+        }
         
     async def create_project(
         self,
         name: str,
-        template: str = "basic",
+        project_type: str,
+        project_config: Dict[str, Any],
         path: Optional[str] = None,
-        **kwargs
-    ) -> ProjectContext:
-        """Create a new project."""
-        try:
-            # Generate project path if not provided
-            if not path:
-                path = os.path.join(
-                    self.config.server_config.workspace_dir,
-                    name
-                )
+        description: str = ""
+    ) -> Any:
+        """Create a new project.
+        
+        Args:
+            name: Project name
+            project_type: Type of project (e.g., java, dotnet, node)
+            project_config: Project-specific configuration
+            path: Project directory path (optional)
+            description: Project description
             
-            # Create project config
-            project_config = ProjectConfig(
-                name=name,
-                path=Path(path),
-                template=template,
-                **kwargs
+        Returns:
+            Project instance
+        """
+        try:
+            if project_type not in PROJECT_TYPES:
+                raise ProjectError(f"Unsupported project type: {project_type}")
+                
+            project_type_info = PROJECT_TYPES[project_type]
+            
+            # Determine project path
+            if not path:
+                projects_dir = Path(self.config.get("projectsDir"))
+                path = str(projects_dir / name)
+                
+            project_path = Path(path)
+            if project_path.exists():
+                raise ProjectError(f"Project path already exists: {path}")
+                
+            # Create project directory
+            project_path.mkdir(parents=True, exist_ok=True)
+            
+            # Create project configuration
+            project_config.update({
+                "name": name,
+                "type": project_type,
+                "description": description,
+                "build_system": project_config.get("build_system", 
+                    project_type_info.default_build_system.value)
+            })
+            
+            # Save project configuration
+            config_path = project_path / "project.json"
+            with open(config_path, "w") as f:
+                json.dump(project_config, f, indent=2)
+                
+            # Create project structure
+            await self._create_project_structure(project_path, project_type_info)
+            
+            # Initialize build system
+            await self._initialize_build_system(
+                project_path, 
+                project_type_info, 
+                project_config
             )
             
-            # Create project context
-            project = ProjectContext(project_config)
-            
-            # Initialize project
-            await project.initialize()
-            # Initialize Git if enabled
-            if project_config.git_enabled:
-                git_manager = GitManager(path)
-                await git_manager.initialize()
-                await project.update_state(git_initialized=True)
-            
-            # Store project
-            self.projects[project.id] = project
-            self.current_project = project
-            
-            logger.info(f"Created project {name} at {path}")
-            return project
-            
-        except Exception as e:
-            raise ProjectError(f"Failed to create project: {str(e)}")
-            
-    async def load_project(self, path: str) -> ProjectContext:
-        """Load an existing project."""
-        try:
-            # Verify project path exists
-            if not os.path.exists(path):
-                raise ProjectNotFoundError(f"Project path does not exist: {path}")
-                
-            # Load project config
-            config_path = os.path.join(path, '.mcp', 'project.json')
-            if not os.path.exists(config_path):
-                raise ProjectNotFoundError(
-                    f"Project configuration not found: {config_path}"
+            # Set up Docker environment if requested
+            if project_config.get("setup_docker", False):
+                await self._setup_docker_environment(
+                    project_path,
+                    project_type_info,
+                    project_config
                 )
                 
-            # Create project context
-            project_config = ProjectConfig.parse_file(config_path)
-            project = ProjectContext(project_config)
+            # Initialize Git repository if requested
+            if project_config.get("initialize_git", True):
+                repo = git.Repo.init(path)
+                repo.index.add("*")
+                repo.index.commit("Initial commit")
+                
+            # Create project instance
+            project = await self._create_project_instance(
+                path,
+                project_config,
+                project_type_info
+            )
             
-            # Store project
+            # Store project reference
             self.projects[project.id] = project
             self.current_project = project
             
-            logger.info(f"Loaded project from {path}")
+            logger.info(f"Created {project_type} project: {name} at {path}")
             return project
             
         except Exception as e:
-            raise ProjectError(f"Failed to load project: {str(e)}")
+            logger.error(f"Failed to create project: {str(e)}")
+            raise ProjectError(f"Project creation failed: {str(e)}")
             
-    def get_project(self, project_id: str) -> Optional[ProjectContext]:
-        """Get project by ID."""
-        return self.projects.get(project_id)
+    async def _create_project_structure(
+        self,
+        project_path: Path,
+        project_type: ProjectType
+    ):
+        """Create project directory structure.
         
-    def list_projects(self) -> List[dict]:
-        """List all projects."""
-        return [
-            {
-                "id": project_id,
-                "name": project.config.name,
-                "path": str(project.path),
-                "template": project.config.template,
-                "initialized": project.state.initialized
+        Args:
+            project_path: Project directory path
+            project_type: Project type information
+        """
+        def create_directory_structure(base_path: Path, structure: Dict[str, Any]):
+            for name, content in structure.items():
+                path = base_path / name
+                if isinstance(content, dict):
+                    path.mkdir(exist_ok=True)
+                    create_directory_structure(path, content)
+                    
+        create_directory_structure(project_path, project_type.file_structure)
+        
+    async def _initialize_build_system(
+        self,
+        project_path: Path,
+        project_type: ProjectType,
+        project_config: Dict[str, Any]
+    ):
+        """Initialize project build system.
+        
+        Args:
+            project_path: Project directory path
+            project_type: Project type information
+            project_config: Project configuration
+        """
+        build_system = BuildSystem(project_config["build_system"])
+        
+        # Generate build system configuration files
+        if build_system == BuildSystem.MAVEN:
+            await self.template_manager.generate_maven_pom(
+                project_path, project_config
+            )
+        elif build_system == BuildSystem.GRADLE:
+            await self.template_manager.generate_gradle_build(
+                project_path, project_config
+            )
+        elif build_system == BuildSystem.DOTNET:
+            await self.template_manager.generate_dotnet_project(
+                project_path, project_config
+            )
+        elif build_system in [BuildSystem.NPM, BuildSystem.YARN]:
+            await self.template_manager.generate_package_json(
+                project_path, project_config
+            )
+        elif build_system == BuildSystem.POETRY:
+            await self.template_manager.generate_pyproject_toml(
+                project_path, project_config
+            )
+            
+    async def _setup_docker_environment(
+        self,
+        project_path: Path,
+        project_type: ProjectType,
+        project_config: Dict[str, Any]
+    ):
+        """Set up Docker environment for the project.
+        
+        Args:
+            project_path: Project directory path
+            project_type: Project type information
+            project_config: Project configuration
+        """
+        # Generate Dockerfile from template
+        dockerfile_template = project_type.docker_templates[0]  # Use first template
+        dockerfile_content = await self.docker_manager.generate_dockerfile(
+            dockerfile_template,
+            project_config
+        )
+        
+        dockerfile_path = project_path / "Dockerfile"
+        with open(dockerfile_path, "w") as f:
+            f.write(dockerfile_content)
+            
+        # Generate docker-compose.yml if needed
+        if project_config.get("use_docker_compose", False):
+            services = {
+                "app": {
+                    "build": ".",
+                    "volumes": [
+                        "./:/workspace"
+                    ],
+                    "environment": project_type.environment_variables
+                }
             }
-            for project_id, project in self.projects.items()
-        ]
+            
+            compose_content = await self.docker_manager.create_compose_config(
+                project_config["name"],
+                services,
+                project_path / "docker-compose.yml"
+            )
+            
+    async def _create_project_instance(
+        self,
+        path: str,
+        config: Dict[str, Any],
+        project_type: ProjectType
+    ) -> Any:
+        """Create project instance based on type.
         
-    async def set_current_project(self, project_id: str) -> None:
-        """Set the current active project."""
-        if project := self.get_project(project_id):
-            self.current_project = project
-            logger.info(f"Set current project to {project.config.name}")
+        Args:
+            path: Project directory path
+            config: Project configuration
+            project_type: Project type information
+            
+        Returns:
+            Project instance
+        """
+        # Import appropriate project class based on type
+        if project_type.name == "java":
+            from .java_project import JavaProject
+            return JavaProject(path, config, project_type)
+        elif project_type.name == "dotnet":
+            from .dotnet_project import DotNetProject
+            return DotNetProject(path, config, project_type)
+        elif project_type.name == "node":
+            from .node_project import NodeProject
+            return NodeProject(path, config, project_type)
+        elif project_type.name == "python":
+            from .python_project import PythonProject
+            return PythonProject(path, config, project_type)
+        elif project_type.name == "golang":
+            from .golang_project import GolangProject
+            return GolangProject(path, config, project_type)
         else:
-            raise ProjectNotFoundError(f"Project not found: {project_id}")
-            
-    async def delete_project(self, project_id: str, delete_files: bool = False) -> None:
-        """Delete a project."""
-        try:
-            if project := self.get_project(project_id):
-                # Clean up project resources
-                await project.cleanup()
-                
-                # Remove from projects dict
-                del self.projects[project_id]
-                
-                # Clear current project if it was this one
-                if self.current_project and self.current_project.id == project_id:
-                    self.current_project = None
-                    
-                # Optionally delete project files
-                if delete_files and os.path.exists(project.path):
-                    import shutil
-                    shutil.rmtree(project.path)
-                    
-                logger.info(f"Deleted project {project.config.name}")
-            else:
-                raise ProjectNotFoundError(f"Project not found: {project_id}")
-                
-        except Exception as e:
-            raise ProjectError(f"Failed to delete project: {str(e)}")
-            
-    async def cleanup(self) -> None:
-        """Clean up all project resources."""
-        try:
-            for project in self.projects.values():
-                await project.cleanup()
-                
-            self.projects.clear()
-            self.current_project = None
-            
-            logger.info("Cleaned up all projects")
-            
-        except Exception as e:
-            logger.error(f"Error during project cleanup: {str(e)}")
+            from .base_project import Project
+            return Project(path, config, project_type)

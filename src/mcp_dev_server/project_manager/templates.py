@@ -1,13 +1,13 @@
-"""Project template system for MCP Development Server."""
+"""Template system for project creation."""
 import os
-import json
 import shutil
-from typing import Dict, List, Optional
 from pathlib import Path
+from typing import Dict, Any, List
+import jinja2
+import yaml
 
-from jinja2 import Environment, FileSystemLoader
 from ..utils.logging import setup_logging
-from ..utils.errors import TemplateError
+from ..utils.errors import ProjectError
 
 logger = setup_logging(__name__)
 
@@ -15,134 +15,216 @@ class TemplateManager:
     """Manages project templates."""
     
     def __init__(self):
-        self.template_dir = os.path.join(
-            os.path.dirname(__file__),
-            '..',
-            'resources',
-            'templates'
-        )
-        self.env = Environment(
-            loader=FileSystemLoader(self.template_dir),
-            trim_blocks=True,
-            lstrip_blocks=True
+        """Initialize template manager."""
+        self.template_dir = self._get_template_dir()
+        self.env = jinja2.Environment(
+            loader=jinja2.FileSystemLoader(str(self.template_dir)),
+            autoescape=jinja2.select_autoescape()
         )
         
-    def list_templates(self) -> List[dict]:
-        """List available templates."""
-        templates = []
-        for template_name in os.listdir(self.template_dir):
-            template_path = os.path.join(self.template_dir, template_name)
-            if os.path.isdir(template_path):
-                # Load template metadata
-                meta_path = os.path.join(template_path, 'template.json')
-                if os.path.exists(meta_path):
-                    with open(meta_path) as f:
-                        metadata = json.load(f)
-                        templates.append({
-                            "name": template_name,
-                            **metadata
-                        })
-                        
-        return templates
+    def _get_template_dir(self) -> Path:
+        """Get templates directory path."""
+        if os.name == "nt":  # Windows
+            template_dir = Path(os.getenv("APPDATA")) / "Claude" / "templates"
+        else:  # macOS/Linux
+            template_dir = Path.home() / ".config" / "claude" / "templates"
+            
+        template_dir.mkdir(parents=True, exist_ok=True)
         
-    async def apply_template(
-        self,
-        template_name: str,
-        target_path: str,
-        variables: Optional[Dict] = None
-    ) -> None:
-        """Apply a template to a target directory."""
+        # Initialize with basic template if empty
+        if not any(template_dir.iterdir()):
+            self._initialize_basic_template(template_dir)
+            
+        return template_dir
+        
+    def _initialize_basic_template(self, template_dir: Path):
+        """Initialize basic project template.
+        
+        Args:
+            template_dir: Templates directory path
+        """
+        basic_dir = template_dir / "basic"
+        basic_dir.mkdir(exist_ok=True)
+        
+        # Create template configuration
+        config = {
+            "name": "basic",
+            "description": "Basic project template",
+            "version": "1.0.0",
+            "files": [
+                "README.md",
+                "requirements.txt",
+                ".gitignore",
+                "src/__init__.py",
+                "tests/__init__.py"
+            ],
+            "variables": {
+                "project_name": "",
+                "description": ""
+            },
+            "features": {
+                "git": True,
+                "tests": True,
+                "docker": False
+            }
+        }
+        
+        with open(basic_dir / "template.yaml", "w") as f:
+            yaml.dump(config, f)
+            
+        # Create template files
+        readme_content = """# {{ project_name }}
+
+{{ description }}
+
+## Installation
+
+```bash
+pip install -r requirements.txt
+```
+
+## Usage
+
+```python
+from {{ project_name.lower() }} import main
+```
+
+## Testing
+
+```bash
+pytest tests/
+```
+"""
+        
+        with open(basic_dir / "README.md", "w") as f:
+            f.write(readme_content)
+            
+        # Create source directory
+        src_dir = basic_dir / "src"
+        src_dir.mkdir(exist_ok=True)
+        
+        with open(src_dir / "__init__.py", "w") as f:
+            f.write('"""{{ project_name }} package."""\n')
+            
+        # Create tests directory
+        tests_dir = basic_dir / "tests"
+        tests_dir.mkdir(exist_ok=True)
+        
+        with open(tests_dir / "__init__.py", "w") as f:
+            f.write('"""Tests for {{ project_name }}."""\n')
+            
+        # Create requirements.txt
+        with open(basic_dir / "requirements.txt", "w") as f:
+            f.write("pytest>=7.0.0\n")
+            
+        # Create .gitignore
+        gitignore_content = """__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+"""
+        
+        with open(basic_dir / ".gitignore", "w") as f:
+            f.write(gitignore_content)
+            
+    async def apply_template(self, template_name: str, project: Any) -> None:
+        """Apply template to project.
+        
+        Args:
+            template_name: Name of template to apply
+            project: Project instance
+        """
         try:
-            template_path = os.path.join(self.template_dir, template_name)
-            if not os.path.exists(template_path):
-                raise TemplateError(f"Template not found: {template_name}")
+            template_path = self.template_dir / template_name
+            if not template_path.exists():
+                raise ProjectError(f"Template not found: {template_name}")
                 
             # Load template configuration
-            config_path = os.path.join(template_path, 'template.json')
-            if os.path.exists(config_path):
-                with open(config_path) as f:
-                    template_config = json.load(f)
-            else:
-                template_config = {}
+            with open(template_path / "template.yaml", "r") as f:
+                template_config = yaml.safe_load(f)
                 
-            # Create target directory
-            os.makedirs(target_path, exist_ok=True)
+            # Prepare template variables
+            variables = {
+                "project_name": project.config.name,
+                "description": project.config.description
+            }
             
-            # Copy template files
-            for root, _, files in os.walk(os.path.join(template_path, 'files')):
-                rel_path = os.path.relpath(root, os.path.join(template_path, 'files'))
-                target_dir = os.path.join(target_path, rel_path)
-                os.makedirs(target_dir, exist_ok=True)
-                
-                for file in files:
-                    if file.endswith('.j2'):  # Jinja2 template
-                        template = self.env.get_template(
-                            os.path.join(template_name, 'files', rel_path, file)
-                        )
-                        output = template.render(**(variables or {}))
+            # Process each template file
+            for file_path in template_config["files"]:
+                template_file = template_path / file_path
+                if template_file.exists():
+                    # Create target directory if needed
+                    target_path = Path(project.path) / file_path
+                    target_path.parent.mkdir(parents=True, exist_ok=True)
+                    
+                    # Render template content
+                    template = self.env.get_template(f"{template_name}/{file_path}")
+                    content = template.render(**variables)
+                    
+                    # Write rendered content
+                    with open(target_path, "w") as f:
+                        f.write(content)
                         
-                        # Write rendered template
-                        output_file = os.path.join(
-                            target_dir,
-                            file[:-3]  # Remove .j2 extension
-                        )
-                        with open(output_file, 'w') as f:
-                            f.write(output)
-                    else:
-                        # Copy regular file
-                        src = os.path.join(root, file)
-                        dst = os.path.join(target_dir, file)
-                        shutil.copy2(src, dst)
-                        
-            # Run post-template hooks if defined
-            await self._run_hooks(
-                template_config.get('hooks', {}),
-                target_path,
-                variables or {}
-            )
-            
-            logger.info(f"Applied template {template_name} to {target_path}")
+            logger.info(f"Applied template {template_name} to project {project.config.name}")
             
         except Exception as e:
-            raise TemplateError(f"Failed to apply template: {str(e)}")
+            logger.error(f"Failed to apply template: {str(e)}")
+            raise ProjectError(f"Template application failed: {str(e)}")
             
-    async def _run_hooks(
-        self,
-        hooks: Dict,
-        target_path: str,
-        variables: Dict
-    ) -> None:
-        """Run template hooks."""
+    async def template_has_git(self, template_name: str) -> bool:
+        """Check if template includes Git initialization.
+        
+        Args:
+            template_name: Template name
+            
+        Returns:
+            bool: True if template includes Git
+        """
         try:
-            if post_create := hooks.get('post-create'):
-                if isinstance(post_create, list):
-                    for cmd in post_create:
-                        # Template the command
-                        cmd_template = self.env.from_string(cmd)
-                        command = cmd_template.render(**variables)
-                        
-                        # Execute command
-                        import subprocess
-                        subprocess.run(
-                            command,
-                            shell=True,
-                            check=True,
-                            cwd=target_path
-                        )
-                        
-        except Exception as e:
-            raise TemplateError(f"Failed to run template hooks: {str(e)}")
-            
-    def get_template_variables(self, template_name: str) -> Dict:
-        """Get required variables for a template."""
-        template_path = os.path.join(self.template_dir, template_name)
-        if not os.path.exists(template_path):
-            raise TemplateError(f"Template not found: {template_name}")
-            
-        config_path = os.path.join(template_path, 'template.json')
-        if os.path.exists(config_path):
-            with open(config_path) as f:
-                config = json.load(f)
-                return config.get('variables', {})
+            template_path = self.template_dir / template_name
+            if not template_path.exists():
+                return False
                 
-        return {}
+            # Load template configuration
+            with open(template_path / "template.yaml", "r") as f:
+                template_config = yaml.safe_load(f)
+                
+            return template_config.get("features", {}).get("git", False)
+            
+        except Exception:
+            return False
+            
+    def list_templates(self) -> List[Dict[str, Any]]:
+        """Get list of available templates.
+        
+        Returns:
+            List[Dict[str, Any]]: Template information
+        """
+        templates = []
+        
+        for template_dir in self.template_dir.iterdir():
+            if template_dir.is_dir():
+                config_path = template_dir / "template.yaml"
+                if config_path.exists():
+                    with open(config_path, "r") as f:
+                        config = yaml.safe_load(f)
+                        templates.append(config)
+                        
+        return templates
